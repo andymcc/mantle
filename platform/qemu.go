@@ -15,7 +15,6 @@
 package platform
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -383,20 +382,29 @@ func Virtio(board, device, args string) string {
 func setupIgnition(confPath string, diskImagePath string) error {
 	fileRemoteLocation := "/boot/ignition/config.ign"
 
-	plog.Debugf("START guestfs")
-
+	// Set guestfish backend to direct in order to avoid libvirt as backend.
+	// Using libvirt can lead to permission denied issues if it does not have access
+	// rights to the qcow image
+	os.Setenv("LIBGUESTFS_BACKEND", "direct")
 	cmd := exec.Command("guestfish", "--listen", "-a", diskImagePath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("getting stdout pipe: %v", err)
 	}
+
+	defer func() {
+		plog.Debugf("guestfish exit")
+		if err := exec.Command("guestfish", "--remote", "--", "exit").Run(); err != nil {
+			plog.Errorf("guestfish exit failed: %v", err)
+		}
+	}()
 	defer stdout.Close()
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("running guestfish: %v", err)
 	}
 	buf, err := ioutil.ReadAll(stdout)
 	if err != nil {
-		cmd.Wait()
 		return fmt.Errorf("reading guestfish output: %v", err)
 	}
 	if err := cmd.Wait(); err != nil {
@@ -421,13 +429,6 @@ func setupIgnition(confPath string, diskImagePath string) error {
 		return fmt.Errorf("guestfish command failed: %v", err)
 	}
 
-	defer func() {
-		plog.Debugf("guestfish exit")
-		if err := exec.Command("guestfish", "--remote", "--", "exit").Run(); err != nil {
-			plog.Errorf("guestfish exit failed: %v", err)
-		}
-	}()
-
 	if err := exec.Command("guestfish", "--remote", "--", "mount", rootfs, "/").Run(); err != nil {
 		return fmt.Errorf("guestfish root mount failed: %v", err)
 	}
@@ -448,24 +449,15 @@ func setupIgnition(confPath string, diskImagePath string) error {
 		return fmt.Errorf("guestfish umount failed: %v", err)
 	}
 
-	plog.Debugf("SUCCESS guestfs")
 	return nil
 }
 
 func findLabel(label string) (string, error) {
 	cmd := exec.Command("guestfish", "--remote", "findfs-label", label)
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := cmd.Output()
+
 	if err != nil {
 		return "", fmt.Errorf("get stdout for findfs-label failed: %v", err)
 	}
-	defer stdout.Close()
-
-	err = cmd.Start()
-	if err != nil {
-		return "", fmt.Errorf("start findfs-label command failed: %v", err)
-	}
-
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(stdout)
-	return strings.TrimSpace(buf.String()), nil
+	return strings.TrimSpace(string(stdout)), nil
 }
