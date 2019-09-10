@@ -265,6 +265,14 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 			"-cpu", "host",
 			"-m", "2048",
 		}
+        case "ppc64le--ppc64le-usr":
+                qmBinary = "qemu-system-ppc64"
+                qmCmd = []string{
+                        "qemu-system-ppc64",
+                        "-machine", "accel=kvm",
+                        "-cpu", "host",
+                        "-m", "2048",
+                }
 	case "s390x--s390x-usr":
 		qmBinary = "qemu-system-s390x"
 		qmCmd = []string{
@@ -285,7 +293,7 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 		"-serial", "chardev:log",
 	)
 
-	if board != "s390x-usr" {
+	if board != "ppc64le-usr" && board != "s390x-usr" {
 		qmCmd = append(qmCmd, "-bios", biosImage)
 	}
 
@@ -357,6 +365,8 @@ func Virtio(board, device, args string) string {
 		suffix = "pci"
 	case "arm64-usr":
 		suffix = "device"
+	case "ppc64le-usr":
+	        suffix = "pci"
 	case "s390x-usr":
 		suffix = "ccw"
 	default:

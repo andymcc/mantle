@@ -8,7 +8,7 @@ properties([
 
     parameters([
         choice(name: 'GOARCH',
-               choices: "amd64\narm64\ns390x",
+               choices: "amd64\narm64\nppc64le\ns390x",
                description: 'target architecture for building binaries')
     ]),
 

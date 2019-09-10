@@ -65,11 +65,13 @@ var (
 	defaultPlan = map[string]string{
 		"amd64-usr": "baremetal_0",
 		"arm64-usr": "baremetal_2a",
+		"ppc64le-usr": "baremetal_4a",
 		"s390x-usr": "baremetal_3a",
 	}
 	linuxConsole = map[string]string{
 		"amd64-usr": "ttyS1,115200",
 		"arm64-usr": "ttyAMA0,115200",
+		"ppc64le-usr": "hvc0,115200",
 		"s390x-usr": "ttysclp0,115200",
 	}
 )
