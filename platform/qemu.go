@@ -39,6 +39,7 @@ type Disk struct {
 	Size        string   // disk image size in bytes, optional suffixes "K", "M", "G", "T" allowed. Incompatible with BackingFile
 	BackingFile string   // raw disk image to use. Incompatible with Size.
 	DeviceOpts  []string // extra options to pass to qemu. "serial=XXXX" makes disks show up as /dev/disk/by-id/virtio-<serial>
+	ConfPath    string   // path to ignition to be able to use it with guestfs for temporary qcow2 images
 }
 
 var (
@@ -167,14 +168,14 @@ func (d Disk) setupFile() (*os.File, error) {
 	}
 
 	if d.Size != "" {
-		return setupDisk(d.Size)
+		return setupDisk(d.Size, d.ConfPath)
 	} else {
-		return setupDiskFromFile(d.BackingFile)
+		return setupDiskFromFile(d.BackingFile, d.ConfPath)
 	}
 }
 
 // Create a nameless temporary qcow2 image file backed by a raw image.
-func setupDiskFromFile(imageFile string) (*os.File, error) {
+func setupDiskFromFile(imageFile string, confPath string) (*os.File, error) {
 	// a relative path would be interpreted relative to /tmp
 	backingFile, err := filepath.Abs(imageFile)
 	if err != nil {
@@ -191,10 +192,10 @@ func setupDiskFromFile(imageFile string) (*os.File, error) {
 	}
 
 	qcowOpts := fmt.Sprintf("backing_file=%s,lazy_refcounts=on", backingFile)
-	return setupDisk("-o", qcowOpts)
+	return setupDisk(confPath, "-o", qcowOpts)
 }
 
-func setupDisk(additionalOptions ...string) (*os.File, error) {
+func setupDisk(confPath string, additionalOptions ...string) (*os.File, error) {
 	dstFileName, err := mkpath("")
 	if err != nil {
 		return nil, err
@@ -210,7 +211,12 @@ func setupDisk(additionalOptions ...string) (*os.File, error) {
 	if err := qemuImg.Run(); err != nil {
 		return nil, err
 	}
-
+	if len(confPath) > 0 {
+		err = setupIgnition(confPath, dstFileName)
+		if err != nil {
+			return nil, fmt.Errorf("ignition injection with guestfs failed: %v", err)
+		}
+	}
 	return os.OpenFile(dstFileName, os.O_RDWR, 0)
 }
 
@@ -298,8 +304,11 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 	}
 
 	if isIgnition {
-		qmCmd = append(qmCmd,
-			"-fw_cfg", "name=opt/com.coreos/config,file="+confPath)
+		// -fw_cfg is not supported for s390x, instead guestfs utility is used
+		if board != "s390x-usr" {
+			qmCmd = append(qmCmd,
+				"-fw_cfg", "name=opt/com.coreos/config,file="+confPath)
+		}
 	} else {
 		qmCmd = append(qmCmd,
 			"-fsdev", "local,id=cfg,security_model=none,readonly,path="+confPath,
@@ -326,12 +335,17 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 		plog.Debugf("disabling auto-read-only for QEMU drives")
 	}
 
-	allDisks := append([]Disk{
-		{
-			BackingFile: diskImagePath,
-			DeviceOpts:  primaryDiskOptions,
-		},
-	}, options.AdditionalDisks...)
+	primaryDisk := Disk{
+		BackingFile: diskImagePath,
+		DeviceOpts:  primaryDiskOptions,
+		ConfPath:    "",
+	}
+
+	if board == "s390x-usr" {
+		primaryDisk.ConfPath = confPath
+	}
+
+	allDisks := append([]Disk{primaryDisk}, options.AdditionalDisks...)
 
 	var extraFiles []*os.File
 	fdnum := 3 // first additional file starts at position 3
@@ -373,4 +387,87 @@ func Virtio(board, device, args string) string {
 		panic(board)
 	}
 	return fmt.Sprintf("virtio-%s-%s,%s", device, suffix, args)
+}
+
+func setupIgnition(confPath string, diskImagePath string) error {
+	fileRemoteLocation := "/boot/ignition/config.ign"
+
+	// Set guestfish backend to direct in order to avoid libvirt as backend.
+	// Using libvirt can lead to permission denied issues if it does not have access
+	// rights to the qcow image
+	os.Setenv("LIBGUESTFS_BACKEND", "direct")
+	cmd := exec.Command("guestfish", "--listen", "-a", diskImagePath)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("getting stdout pipe: %v", err)
+	}
+
+	defer func() {
+		plog.Debugf("guestfish exit")
+		if err := exec.Command("guestfish", "--remote", "--", "exit").Run(); err != nil {
+			plog.Errorf("guestfish exit failed: %v", err)
+		}
+	}()
+	defer stdout.Close()
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("running guestfish: %v", err)
+	}
+	buf, err := ioutil.ReadAll(stdout)
+	if err != nil {
+		return fmt.Errorf("reading guestfish output: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("waiting for guestfish response: %v", err)
+	}
+	//GUESTFISH_PID=$PID; export GUESTFISH_PID
+	gfVarPid := strings.Split(string(buf), ";")
+	gfVarPidArr := strings.Split(gfVarPid[0], "=")
+	os.Setenv(gfVarPidArr[0], gfVarPidArr[1])
+
+	if err := exec.Command("guestfish", "--remote", "--", "run").Run(); err != nil {
+		return fmt.Errorf("guestfish launch failed: %v", err)
+	}
+
+	bootfs, err := findLabel("boot")
+	if err != nil {
+		return fmt.Errorf("guestfish command failed: %v", err)
+	}
+
+	rootfs, err := findLabel("root")
+	if err != nil {
+		return fmt.Errorf("guestfish command failed: %v", err)
+	}
+
+	if err := exec.Command("guestfish", "--remote", "--", "mount", rootfs, "/").Run(); err != nil {
+		return fmt.Errorf("guestfish root mount failed: %v", err)
+	}
+
+	if err := exec.Command("guestfish", "--remote", "--", "mount", bootfs, "/boot").Run(); err != nil {
+		return fmt.Errorf("guestfish boot mount failed: %v", err)
+	}
+
+	if err := exec.Command("guestfish", "--remote", "--", "mkdir-p", "/boot/ignition").Run(); err != nil {
+		return fmt.Errorf("guestfish directory creation failed: %v", err)
+	}
+
+	if err := exec.Command("guestfish", "--remote", "--", "upload", confPath, fileRemoteLocation).Run(); err != nil {
+		return fmt.Errorf("guestfish upload failed: %v", err)
+	}
+
+	if err := exec.Command("guestfish", "--remote", "--", "umount-all").Run(); err != nil {
+		return fmt.Errorf("guestfish umount failed: %v", err)
+	}
+
+	return nil
+}
+
+func findLabel(label string) (string, error) {
+	cmd := exec.Command("guestfish", "--remote", "findfs-label", label)
+	stdout, err := cmd.Output()
+
+	if err != nil {
+		return "", fmt.Errorf("get stdout for findfs-label failed: %v", err)
+	}
+	return strings.TrimSpace(string(stdout)), nil
 }
