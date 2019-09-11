@@ -305,7 +305,7 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 
 	if isIgnition {
 		// -fw_cfg is not supported for s390x, instead guestfs utility is used
-		if board != "s390x-usr" {
+		if board != "ppc64le-usr" && board != "s390x-usr" {
 			qmCmd = append(qmCmd,
 				"-fw_cfg", "name=opt/com.coreos/config,file="+confPath)
 		}
@@ -341,7 +341,7 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 		ConfPath:    "",
 	}
 
-	if board == "s390x-usr" {
+	if board == "ppc64le-usr" || board == "s390x-usr" {
 		primaryDisk.ConfPath = confPath
 	}
 
