@@ -152,7 +152,9 @@ func baseQemuArgs(board string) []string {
 	case "ppc64le--ppc64le-usr":
 		return []string{
 			"qemu-system-ppc64",
-			"-machine", "pseries,accel=kvm,kvm-type=HV",
+			"-accel", "kvm",
+			"-M", "pseries-3.1",
+			"-cpu", "host",
 		}
 	default:
 		panic("host-guest combo not supported: " + combo)
@@ -264,6 +266,7 @@ func CreateQEMUCommand(board, uuid, biosImage, consolePath, confPath, diskImageP
 		fdnum += 1
 		fdset += 1
 	}
+	fmt.Println(qmCmd)
 
 	return qmCmd, extraFiles, nil
 }
